@@ -8,6 +8,7 @@ _ATTRS = {
         executable = True,
         cfg = "exec",
     ),
+    "_default_baseline": attr.string(default = "detekt_baseline.xml"),
     "srcs": attr.label_list(
         mandatory = True,
         allow_files = [".kt", ".kts"],
@@ -23,6 +24,10 @@ _ATTRS = {
         default = None,
         allow_single_file = [".xml"],
         doc = "[Detekt baseline file](https://detekt.github.io/detekt/baseline.html).",
+    ),
+    "create_baseline": attr.bool(
+        default = False,
+        doc = "See [Detekt `--create-baseline` option](https://detekt.github.io/detekt/cli.html).",
     ),
     "html_report": attr.bool(
         default = False,
@@ -83,7 +88,29 @@ def _impl(ctx, run_as_test_target):
     action_inputs.extend(ctx.files.cfgs)
     detekt_arguments.add_joined("--config", ctx.files.cfgs, join_with = ",")
 
-    if ctx.attr.baseline != None:
+    internal_baseline = None
+    baseline_script = ""
+    run_files = []
+    if ctx.attr.create_baseline:
+        detekt_arguments.add("--create-baseline")
+        internal_baseline = ctx.actions.declare_file("{}_baseline.xml".format(ctx.label.name))
+        run_files += [internal_baseline]
+        action_outputs.append(internal_baseline)
+        detekt_arguments.add("--baseline", internal_baseline)
+        final_baseline = ctx.files.baseline[0].short_path if len(ctx.files.baseline) != 0 else "%s/%s" % (ctx.label.package, ctx.attr._default_baseline)
+
+        if ctx.file.baseline != None:
+            action_inputs.append(ctx.file.baseline)
+
+        baseline_script = """
+                    #!/bin/bash
+                    cp -rf {source} $BUILD_WORKING_DIRECTORY/{target}
+                    echo "$(tput setaf 2)Updated {target} $(tput sgr0)"
+                            """.format(
+            source = internal_baseline.short_path,
+            target = final_baseline,
+        )
+    elif ctx.attr.baseline != None:
         action_inputs.append(ctx.file.baseline)
         detekt_arguments.add("--baseline", ctx.file.baseline)
 
@@ -123,6 +150,7 @@ def _impl(ctx, run_as_test_target):
     detekt_arguments.add_joined("--plugins", ctx.files.plugins, join_with = ",")
 
     execution_result = ctx.actions.declare_file("{}_exit_code.txt".format(ctx.label.name))
+    run_files += [execution_result]
     action_outputs.append(execution_result)
     detekt_arguments.add("--execution-result", "{}".format(execution_result.path))
 
@@ -138,6 +166,8 @@ def _impl(ctx, run_as_test_target):
         },
         arguments = [java_arguments, detekt_arguments],
     )
+    run_files += [txt_report]
+    txt_report_dummy = txt_report
 
     # Note: this is not compatible with Windows, feel free to submit PR!
     # text report-contents are always printed to shell
@@ -152,8 +182,9 @@ report=$(cat {text_report})
 if [ ! -z "$report" ]; then
     echo "$report"
 fi
+{baseline_script}
 exit "$exit_code"
-""".format(execution_result = execution_result.short_path, text_report = txt_report.short_path),
+""".format(execution_result = execution_result.short_path, text_report = txt_report_dummy.short_path, baseline_script = baseline_script),
         is_executable = True,
     )
 
@@ -161,7 +192,7 @@ exit "$exit_code"
         DefaultInfo(
             files = depset(action_outputs),
             executable = final_result,
-            runfiles = ctx.runfiles(files = [execution_result, txt_report]),
+            runfiles = ctx.runfiles(files = run_files),
         ),
     ]
 
